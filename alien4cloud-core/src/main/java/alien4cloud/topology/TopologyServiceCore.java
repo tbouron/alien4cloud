@@ -2,12 +2,16 @@ package alien4cloud.topology;
 
 import java.util.Collection;
 import java.util.Date;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
 import java.util.Set;
 import java.util.UUID;
+import java.util.function.BiConsumer;
+import java.util.function.BiFunction;
 import java.util.function.Consumer;
+import java.util.function.Function;
 import java.util.function.Supplier;
 
 import javax.annotation.Resource;
@@ -32,11 +36,15 @@ import alien4cloud.model.components.CapabilityDefinition;
 import alien4cloud.model.components.Csar;
 import alien4cloud.model.components.DeploymentArtifact;
 import alien4cloud.model.components.IValue;
+import alien4cloud.model.components.ImplementationArtifact;
 import alien4cloud.model.components.IndexedCapabilityType;
 import alien4cloud.model.components.IndexedModelUtils;
 import alien4cloud.model.components.IndexedNodeType;
 import alien4cloud.model.components.IndexedRelationshipType;
 import alien4cloud.model.components.IndexedToscaElement;
+import alien4cloud.model.components.Interface;
+import alien4cloud.model.components.Operation;
+import alien4cloud.model.components.OperationOutput;
 import alien4cloud.model.components.PropertyDefinition;
 import alien4cloud.model.components.RequirementDefinition;
 import alien4cloud.model.components.ScalarPropertyValue;
@@ -229,6 +237,8 @@ public class TopologyServiceCore {
         return buildNodeTemplate(dependencies, indexedNodeType, templateToMerge, repoToscaElementFinder);
     }
 
+    private static ThreadLocal<IndexedNodeType> currentNodeType = ThreadLocal.withInitial(() -> null);
+    
     /**
      * Build a node template
      *
@@ -239,51 +249,72 @@ public class TopologyServiceCore {
      */
     public static NodeTemplate buildNodeTemplate(Set<CSARDependency> dependencies, IndexedNodeType indexedNodeType, NodeTemplate templateToMerge,
             IToscaElementFinder toscaElementFinder) {
+        currentNodeType.set(indexedNodeType);
         NodeTemplate nodeTemplate = new NodeTemplate();
+        if (templateToMerge==null) {
+            templateToMerge = new NodeTemplate();
+        }
+        
         nodeTemplate.setType(indexedNodeType.getElementId());
+        setFirstNonNull(nodeTemplate::setName, templateToMerge::getName);
+        
         Map<String, Capability> capabilities = Maps.newLinkedHashMap();
         Map<String, Requirement> requirements = Maps.newLinkedHashMap();
         Map<String, AbstractPropertyValue> properties = Maps.newLinkedHashMap();
         Map<String, String> attributes = Maps.newLinkedHashMap();
         
-        Map<String, DeploymentArtifact> deploymentArtifacts =
-            indexedNodeType.getArtifacts() != null ? Maps.newLinkedHashMap(indexedNodeType.getArtifacts()) : Maps.<String, DeploymentArtifact>newLinkedHashMap();
-        Map<String, DeploymentArtifact> deploymentArtifactsToMerge = templateToMerge != null ? templateToMerge.getArtifacts() : null;
-        if (deploymentArtifactsToMerge != null) {
-            for (Entry<String, DeploymentArtifact> mergeArtifactEntry : deploymentArtifactsToMerge.entrySet()) {
-                DeploymentArtifact mergeArtifactValue = mergeArtifactEntry.getValue();
-                DeploymentArtifact parentArtifact = deploymentArtifacts.get(mergeArtifactEntry.getKey());
-                if (parentArtifact!=null) {
-                    // merge
-                    setFirstNonNull(mergeArtifactValue::setArchiveName, mergeArtifactValue::getArchiveName, parentArtifact::getArchiveName, indexedNodeType::getArchiveName);
-                    setFirstNonNull(mergeArtifactValue::setArchiveVersion, mergeArtifactValue::getArchiveVersion, parentArtifact::getArchiveVersion, indexedNodeType::getArchiveVersion);
-                    setFirstNonNull(mergeArtifactValue::setArtifactName, mergeArtifactValue::getArtifactName, parentArtifact::getArtifactName);
-                    setFirstNonNull(mergeArtifactValue::setArtifactRef, mergeArtifactValue::getArtifactRef, parentArtifact::getArtifactRef);
-                    setFirstNonNull(mergeArtifactValue::setArtifactType, mergeArtifactValue::getArtifactType, parentArtifact::getArtifactType);
-                    setFirstNonNull(mergeArtifactValue::setArtifactRepository, mergeArtifactValue::getArtifactRepository, parentArtifact::getArtifactRepository);
-                }
-                deploymentArtifacts.put(mergeArtifactEntry.getKey(), mergeArtifactValue);
-            }
-        }
+        Map<String, DeploymentArtifact> deploymentArtifacts = mergeMaps(templateToMerge.getArtifacts(), indexedNodeType.getArtifacts(), 
+            TopologyServiceCore::mergeDeploymentArtifact);
+        nodeTemplate.setArtifacts(deploymentArtifacts);
+
+        setFirstNonNull(nodeTemplate::setGroups, templateToMerge::getGroups);
+        nodeTemplate.setInterfaces(mergeMaps(templateToMerge.getInterfaces(), indexedNodeType.getInterfaces(),
+            TopologyServiceCore::mergeInterface));
         
+        // TODO merges below this point might not be deep, they are inherited from A4C
+
         fillCapabilitiesMap(capabilities, indexedNodeType.getCapabilities(), dependencies, templateToMerge != null ? templateToMerge.getCapabilities() : null,
                 toscaElementFinder);
         fillRequirementsMap(requirements, indexedNodeType.getRequirements(), dependencies, templateToMerge != null ? templateToMerge.getRequirements() : null,
                 toscaElementFinder);
         fillProperties(properties, indexedNodeType.getProperties(), templateToMerge != null ? templateToMerge.getProperties() : null);
         fillAttributes(attributes, indexedNodeType.getAttributes());
-
+        
         nodeTemplate.setCapabilities(capabilities);
         nodeTemplate.setRequirements(requirements);
         nodeTemplate.setProperties(properties);
         nodeTemplate.setAttributes(attributes);
-        nodeTemplate.setArtifacts(deploymentArtifacts);
+        
         if (templateToMerge != null && templateToMerge.getRelationships() != null) {
             nodeTemplate.setRelationships(templateToMerge.getRelationships());
         }
+        
+        currentNodeType.set(null);
         return nodeTemplate;
     }
 
+    @SafeVarargs
+    private static <T,V> void setFirstNonNull(T target, BiConsumer<T,V> setter, Function<T,V> getter, T ...sources) {
+        merge(target, setter, (v1,v2)->(v1!=null ? v1 : v2), getter, sources);
+    }
+
+    @SafeVarargs
+    private static <T,V> void merge(T target, BiConsumer<T,V> setter, BiFunction<V,V,V> mergeFunction, Function<T,V> getter, T ...sources) {
+        V value = getter.apply(target);
+        for (T source: sources) {
+            if (source!=null) {
+                V v2 = getter.apply(source);
+                if (value==null) {
+                    value = v2;
+                } else if (v2!=null) {
+                    value = mergeFunction.apply(value, v2);
+                }
+            }
+        }
+        setter.accept(target, value);
+    }
+
+    // alternate format for when sources are different types
     @SafeVarargs
     private static <T,V extends Supplier<T>> void setFirstNonNull(Consumer<T> setter, V ...sources) {
         for (Supplier<T> s: sources) {
@@ -293,6 +324,115 @@ public class TopologyServiceCore {
                 return;
             }
         }
+    }
+    
+    @SafeVarargs
+    private static <T,K,V> Map<K, V> mergeMaps(BiFunction<V,V,V> mergeFn, Function<T,Map<K,V>> getter, T ...sources) {
+        LinkedHashMap<K,V> result = Maps.newLinkedHashMap();
+        for (T source: sources) {
+            if (source!=null && getter.apply(source)!=null) {
+                getter.apply(source).forEach((k,v)->result.put(k, mergeFn.apply(result.get(k), v)));
+            }
+        }
+        return result;
+    }
+
+    // alternate format for when sources are different types
+    private static <K,V> Map<K, V> mergeMaps(Map<K, V> primary, Map<K, V> secondary, BiFunction<V,V,V> mergeFn) {
+        LinkedHashMap<K,V> result = Maps.newLinkedHashMap();
+        if (secondary!=null) {
+            secondary.forEach((k,v)->result.put(k, mergeFn.apply(result.get(k), v)));
+        }
+        if (primary!=null) {
+            primary.forEach((k,v)->result.put(k, mergeFn.apply(result.get(k), v)));
+        }
+        return result;
+    }
+
+    private static Interface mergeInterface(Interface i1, Interface i2) {
+        Interface result = new Interface();
+        setFirstNonNull(result, Interface::setDescription, Interface::getDescription, i1, i2);
+        result.setOperations(mergeMaps(TopologyServiceCore::mergeOperation, Interface::getOperations, i1, i2));
+        return result;
+    }
+
+    private static Operation mergeOperation(Operation o1, Operation o2) {
+        Operation result = new Operation();
+        setFirstNonNull(result, Operation::setDescription, Operation::getDescription, o1, o2);
+        merge(result, Operation::setImplementationArtifact, TopologyServiceCore::mergeImplementationArtifact, Operation::getImplementationArtifact, o1, o2);
+        result.setInputParameters(mergeMaps((v1,v2)->v1!=null?v1:v2, Operation::getInputParameters, o1, o2));
+        result.setOutputs(mergeSetsWithKey(Operation::getOutputs, OperationOutput::getName, o1, o2));
+        return result;
+    }
+    
+    @SafeVarargs
+    @SuppressWarnings("unused")
+    private static <T,V> Set<V> mergeSets(Function<T,Set<V>> getter, T ...sources) {
+        return mergeSetsWithKey(getter, null, sources);
+    }
+    @SafeVarargs
+    private static <T,V,K> Set<V> mergeSetsWithKey(Function<T,Set<V>> getter, Function<V,K> optionalKey, T ...sources) {
+        Set<V> result = null;
+        for (T source: sources) {
+            if (source!=null) result = mergeSetsWithKey(optionalKey, result, getter.apply(source));
+        }
+        return result;
+    }
+
+    private static <V,K> Set<V> mergeSetsWithKey(Function<V,K> optionalKey, Set<V> o1, Set<V> o2) {
+        if (o1==null) return o2;
+        if (o2==null) return o1;
+        if (optionalKey==null) {
+            Set<V> result = Sets.newLinkedHashSet();            
+            result.addAll(o1);
+            result.addAll(o2);
+            return result;
+        }
+        Map<K,V> result = Maps.newLinkedHashMap();
+        o2.forEach(v -> result.put(v==null? null : optionalKey.apply(v), v));
+        o1.forEach(v -> result.put(v==null? null : optionalKey.apply(v), v));
+        return Sets.newLinkedHashSet(result.values());
+    }
+
+    private static DeploymentArtifact mergeDeploymentArtifact(DeploymentArtifact o1, DeploymentArtifact o2) {
+        return mergeDeploymentArtifact(o1, o2, currentNodeType.get());
+    }
+    private static DeploymentArtifact mergeDeploymentArtifact(DeploymentArtifact o1, DeploymentArtifact o2, IndexedNodeType nodeType) {
+        DeploymentArtifact result = new DeploymentArtifact();
+        
+        setFirstNonNull(result, DeploymentArtifact::setArchiveName, DeploymentArtifact::getArchiveName, o1, o2);
+        if (result.getArchiveName()==null && nodeType!=null) result.setArchiveName(nodeType.getArchiveName());
+
+        setFirstNonNull(result, DeploymentArtifact::setArchiveVersion, DeploymentArtifact::getArchiveVersion, o1, o2);
+        if (result.getArchiveVersion()==null && nodeType!=null) result.setArchiveVersion(nodeType.getArchiveVersion());
+
+        setFirstNonNull(result, DeploymentArtifact::setArtifactName, DeploymentArtifact::getArtifactName, o1, o2);
+        setFirstNonNull(result, DeploymentArtifact::setArtifactRef, DeploymentArtifact::getArtifactRef, o1, o2);
+        setFirstNonNull(result, DeploymentArtifact::setArtifactType, DeploymentArtifact::getArtifactType, o1, o2);
+        setFirstNonNull(result, DeploymentArtifact::setArtifactRepository, DeploymentArtifact::getArtifactRepository, o1, o2);
+        
+        return result;
+    }
+
+    private static ImplementationArtifact mergeImplementationArtifact(ImplementationArtifact o1, ImplementationArtifact o2) {
+        return mergeImplementationArtifact(o1, o2, currentNodeType.get());
+    }
+    private static ImplementationArtifact mergeImplementationArtifact(ImplementationArtifact o1, ImplementationArtifact o2, IndexedNodeType nodeType) {
+        ImplementationArtifact result = new ImplementationArtifact();
+        
+        setFirstNonNull(result, ImplementationArtifact::setArchiveName, ImplementationArtifact::getArchiveName, o1, o2);
+        if (result.getArchiveName()==null && nodeType!=null) result.setArchiveName(nodeType.getArchiveName());
+
+        setFirstNonNull(result, ImplementationArtifact::setArchiveVersion, ImplementationArtifact::getArchiveVersion, o1, o2);
+        if (result.getArchiveVersion()==null && nodeType!=null) result.setArchiveVersion(nodeType.getArchiveVersion());
+
+        setFirstNonNull(result, ImplementationArtifact::setArtifactRef, ImplementationArtifact::getArtifactRef, o1, o2);
+        setFirstNonNull(result, ImplementationArtifact::setArtifactType, ImplementationArtifact::getArtifactType, o1, o2);
+        
+        // compared with DeplomentArtifact: name not available, and repository not supported (no setter)
+        
+        return result;
+
     }
 
     private static void fillAttributes(Map<String, String> attributes, Map<String, IValue> attributes2) {
