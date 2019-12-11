@@ -441,7 +441,7 @@ public final class FunctionEvaluator {
         } else if (propertyValue instanceof ScalarPropertyValue) {
             return ((ScalarPropertyValue) propertyValue).getValue();
         } else {
-            throw new NotSupportedException("Property value is not of type scalar");
+            throw new NotSupportedException("Property value is not of type scalar ("+propertyValue+"); if trying to use a TOSCA function, you must set an attribute.");
         }
     }
 
