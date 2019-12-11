@@ -3,11 +3,10 @@
   <parent>
     <groupId>alien4cloud</groupId>
     <artifactId>alien4cloud-parent</artifactId>
-    <version>1.1.0-SM8</version>
+    <version>1.1.0-SM8.cloudsoft</version>
   </parent>
   <artifactId>alien4cloud-common</artifactId>
   <name>Alien 4 Cloud Common</name>
-  <version>1.1.0-SM8.cloudsoft</version>
   <description>Contains classes common to all alien's subprojects.</description>
 
   <properties>
