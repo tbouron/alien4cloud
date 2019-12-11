@@ -7,23 +7,16 @@ import lombok.extern.slf4j.Slf4j;
 
 import org.springframework.beans.factory.config.BeanDefinition;
 import org.springframework.context.annotation.ClassPathScanningCandidateComponentProvider;
-import org.springframework.core.io.ResourceLoader;
 import org.springframework.core.type.filter.AssignableTypeFilter;
 
 @Slf4j
 public final class TypeScanner {
 
-    private static ResourceLoader resourceLoader;
-
-    public static void setResourceLoader(ResourceLoader resourceLoader) {
-        TypeScanner.resourceLoader = resourceLoader;
+    private TypeScanner() {
     }
-    
+
     public static Set<Class<?>> scanTypes(String basePackage, Class<?> targetType) throws ClassNotFoundException {
         ClassPathScanningCandidateComponentProvider scanner = new ClassPathScanningCandidateComponentProvider(false);
-        if (resourceLoader!=null) {
-            scanner.setResourceLoader(resourceLoader);
-        }
 
         AssignableTypeFilter filter = new AssignableTypeFilter(targetType);
         scanner.addIncludeFilter(filter);
