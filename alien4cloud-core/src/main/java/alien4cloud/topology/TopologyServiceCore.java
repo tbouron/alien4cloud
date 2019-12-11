@@ -7,6 +7,8 @@ import java.util.Map;
 import java.util.Map.Entry;
 import java.util.Set;
 import java.util.UUID;
+import java.util.function.Consumer;
+import java.util.function.Supplier;
 
 import javax.annotation.Resource;
 
@@ -14,6 +16,8 @@ import org.apache.commons.collections4.MapUtils;
 import org.elasticsearch.common.collect.Lists;
 import org.elasticsearch.common.collect.Sets;
 import org.springframework.stereotype.Service;
+
+import com.google.common.collect.Maps;
 
 import alien4cloud.component.ICSARRepositoryIndexerService;
 import alien4cloud.component.ICSARRepositorySearchService;
@@ -46,8 +50,6 @@ import alien4cloud.model.topology.SubstitutionTarget;
 import alien4cloud.model.topology.Topology;
 import alien4cloud.utils.MapUtil;
 import alien4cloud.utils.PropertyUtil;
-
-import com.google.common.collect.Maps;
 
 @Service
 public class TopologyServiceCore {
@@ -243,21 +245,27 @@ public class TopologyServiceCore {
         Map<String, Requirement> requirements = Maps.newLinkedHashMap();
         Map<String, AbstractPropertyValue> properties = Maps.newLinkedHashMap();
         Map<String, String> attributes = Maps.newLinkedHashMap();
-        Map<String, DeploymentArtifact> deploymentArtifacts = null;
+        
+        Map<String, DeploymentArtifact> deploymentArtifacts =
+            indexedNodeType.getArtifacts() != null ? Maps.newLinkedHashMap(indexedNodeType.getArtifacts()) : Maps.<String, DeploymentArtifact>newLinkedHashMap();
         Map<String, DeploymentArtifact> deploymentArtifactsToMerge = templateToMerge != null ? templateToMerge.getArtifacts() : null;
         if (deploymentArtifactsToMerge != null) {
-            if (indexedNodeType.getArtifacts() != null) {
-                deploymentArtifacts = Maps.newLinkedHashMap(indexedNodeType.getArtifacts());
-                for (Entry<String, DeploymentArtifact> entryArtifact : deploymentArtifactsToMerge.entrySet()) {
-                    DeploymentArtifact existingArtifact = entryArtifact.getValue();
-                    if (deploymentArtifacts.containsKey(entryArtifact.getKey())) {
-                        deploymentArtifacts.put(entryArtifact.getKey(), existingArtifact);
-                    }
+            for (Entry<String, DeploymentArtifact> mergeArtifactEntry : deploymentArtifactsToMerge.entrySet()) {
+                DeploymentArtifact mergeArtifactValue = mergeArtifactEntry.getValue();
+                DeploymentArtifact parentArtifact = deploymentArtifacts.get(mergeArtifactEntry.getKey());
+                if (parentArtifact!=null) {
+                    // merge
+                    setFirstNonNull(mergeArtifactValue::setArchiveName, mergeArtifactValue::getArchiveName, parentArtifact::getArchiveName, indexedNodeType::getArchiveName);
+                    setFirstNonNull(mergeArtifactValue::setArchiveVersion, mergeArtifactValue::getArchiveVersion, parentArtifact::getArchiveVersion, indexedNodeType::getArchiveVersion);
+                    setFirstNonNull(mergeArtifactValue::setArtifactName, mergeArtifactValue::getArtifactName, parentArtifact::getArtifactName);
+                    setFirstNonNull(mergeArtifactValue::setArtifactRef, mergeArtifactValue::getArtifactRef, parentArtifact::getArtifactRef);
+                    setFirstNonNull(mergeArtifactValue::setArtifactType, mergeArtifactValue::getArtifactType, parentArtifact::getArtifactType);
+                    setFirstNonNull(mergeArtifactValue::setArtifactRepository, mergeArtifactValue::getArtifactRepository, parentArtifact::getArtifactRepository);
                 }
+                deploymentArtifacts.put(mergeArtifactEntry.getKey(), mergeArtifactValue);
             }
-        } else if (indexedNodeType.getArtifacts() != null) {
-            deploymentArtifacts = Maps.newLinkedHashMap(indexedNodeType.getArtifacts());
         }
+        
         fillCapabilitiesMap(capabilities, indexedNodeType.getCapabilities(), dependencies, templateToMerge != null ? templateToMerge.getCapabilities() : null,
                 toscaElementFinder);
         fillRequirementsMap(requirements, indexedNodeType.getRequirements(), dependencies, templateToMerge != null ? templateToMerge.getRequirements() : null,
@@ -274,6 +282,17 @@ public class TopologyServiceCore {
             nodeTemplate.setRelationships(templateToMerge.getRelationships());
         }
         return nodeTemplate;
+    }
+
+    @SafeVarargs
+    private static <T,V extends Supplier<T>> void setFirstNonNull(Consumer<T> setter, V ...sources) {
+        for (Supplier<T> s: sources) {
+            T candidate = s.get();
+            if (candidate!=null) {
+                setter.accept(candidate);
+                return;
+            }
+        }
     }
 
     private static void fillAttributes(Map<String, String> attributes, Map<String, IValue> attributes2) {
