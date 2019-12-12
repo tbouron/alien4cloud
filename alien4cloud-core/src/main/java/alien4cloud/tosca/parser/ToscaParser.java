@@ -13,11 +13,13 @@ import org.yaml.snakeyaml.nodes.Node;
 import org.yaml.snakeyaml.nodes.NodeTuple;
 import org.yaml.snakeyaml.nodes.ScalarNode;
 
+import com.google.common.collect.Maps;
+
+import alien4cloud.component.ICSARRepositorySearchService;
+import alien4cloud.topology.TopologyServiceCore;
 import alien4cloud.tosca.model.ArchiveRoot;
 import alien4cloud.tosca.parser.impl.ErrorCode;
 import alien4cloud.tosca.parser.mapping.generator.MappingGenerator;
-
-import com.google.common.collect.Maps;
 
 /**
  * Main entry point for TOSCA template parsing.
@@ -26,6 +28,9 @@ import com.google.common.collect.Maps;
 public class ToscaParser extends YamlParser<ArchiveRoot> {
     private static final String DEFINITION_TYPE = "definition";
     private Map<String, Map<String, INodeParser>> parserRegistriesByVersion = Maps.newHashMap();
+
+    @Resource
+    private ICSARRepositorySearchService searchService;
 
     @Resource
     private MappingGenerator mappingGenerator;
@@ -84,4 +89,14 @@ public class ToscaParser extends YamlParser<ArchiveRoot> {
             this.definitionVersionTuple = definitionVersionTuple;
         }
     }
+    
+    protected void postParse(ArchiveRoot parsedObject, ParsingContextExecution context) {
+        // seems some of the ancestor info wasn't being set previously,
+        // and some parts of it were using deferred parsers, do this again at the end:
+        if (parsedObject!=null && parsedObject.getTopology()!=null && parsedObject.getTopology().getNodeTemplates()!=null) {
+            parsedObject.getTopology().getNodeTemplates().values().forEach(nodeTemplate ->
+                TopologyServiceCore.mergeAncestorData(nodeTemplate, context, searchService));
+        }
+    }
+
 }

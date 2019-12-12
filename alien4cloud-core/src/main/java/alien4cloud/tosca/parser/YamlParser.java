@@ -5,8 +5,6 @@ import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 
-import lombok.extern.slf4j.Slf4j;
-
 import org.yaml.snakeyaml.composer.Composer;
 import org.yaml.snakeyaml.error.Mark;
 import org.yaml.snakeyaml.error.MarkedYAMLException;
@@ -18,6 +16,7 @@ import org.yaml.snakeyaml.resolver.Resolver;
 
 import alien4cloud.tosca.parser.impl.ErrorCode;
 import alien4cloud.tosca.parser.impl.base.TypeNodeParser;
+import lombok.extern.slf4j.Slf4j;
 
 /**
  * Parser to process Yaml files.
@@ -113,10 +112,14 @@ public abstract class YamlParser<T> {
 
         // process deferred parsing
         context.runDefferedParsers();
-
+        postParse(parsedObject, context);
+        
         return new ParsingResult<T>(parsedObject, context.getParsingContext());
     }
 
+    protected void postParse(T parsedObject, ParsingContextExecution context) {
+    }
+    
     /**
      * Allow to find the parser to use based on the root node.
      * 

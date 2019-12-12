@@ -56,6 +56,9 @@ import alien4cloud.model.topology.RelationshipTemplate;
 import alien4cloud.model.topology.Requirement;
 import alien4cloud.model.topology.SubstitutionTarget;
 import alien4cloud.model.topology.Topology;
+import alien4cloud.tosca.model.ArchiveRoot;
+import alien4cloud.tosca.parser.ParsingContextExecution;
+import alien4cloud.tosca.parser.ToscaParsingUtil;
 import alien4cloud.utils.MapUtil;
 import alien4cloud.utils.PropertyUtil;
 
@@ -237,8 +240,6 @@ public class TopologyServiceCore {
         return buildNodeTemplate(dependencies, indexedNodeType, templateToMerge, repoToscaElementFinder);
     }
 
-    private static ThreadLocal<IndexedNodeType> currentNodeType = ThreadLocal.withInitial(() -> null);
-    
     /**
      * Build a node template
      *
@@ -249,7 +250,6 @@ public class TopologyServiceCore {
      */
     public static NodeTemplate buildNodeTemplate(Set<CSARDependency> dependencies, IndexedNodeType indexedNodeType, NodeTemplate templateToMerge,
             IToscaElementFinder toscaElementFinder) {
-        currentNodeType.set(indexedNodeType);
         NodeTemplate nodeTemplate = new NodeTemplate();
         if (templateToMerge==null) {
             templateToMerge = new NodeTemplate();
@@ -258,26 +258,21 @@ public class TopologyServiceCore {
         nodeTemplate.setType(indexedNodeType.getElementId());
         setFirstNonNull(nodeTemplate::setName, templateToMerge::getName);
         
+        // Note some things (interface artifacts) might have deferred parsers so won't be set yet;
+        // and the deferred parsers have references to instances that the merge method (below) might replace.
+        // We do a deep merge of node templates at the end. Here just copy from the template to merge. 
+
+        nodeTemplate.setArtifacts(templateToMerge.getArtifacts());
+        nodeTemplate.setInterfaces(templateToMerge.getInterfaces());
+        
         Map<String, Capability> capabilities = Maps.newLinkedHashMap();
         Map<String, Requirement> requirements = Maps.newLinkedHashMap();
         Map<String, AbstractPropertyValue> properties = Maps.newLinkedHashMap();
         Map<String, String> attributes = Maps.newLinkedHashMap();
         
-        Map<String, DeploymentArtifact> deploymentArtifacts = mergeMaps(templateToMerge.getArtifacts(), indexedNodeType.getArtifacts(), 
-            TopologyServiceCore::mergeDeploymentArtifact);
-        nodeTemplate.setArtifacts(deploymentArtifacts);
-
-        setFirstNonNull(nodeTemplate::setGroups, templateToMerge::getGroups);
-        nodeTemplate.setInterfaces(mergeMaps(templateToMerge.getInterfaces(), indexedNodeType.getInterfaces(),
-            TopologyServiceCore::mergeInterface));
-        
-        // TODO merges below this point might not be deep, they are inherited from A4C
-
-        fillCapabilitiesMap(capabilities, indexedNodeType.getCapabilities(), dependencies, templateToMerge != null ? templateToMerge.getCapabilities() : null,
-                toscaElementFinder);
-        fillRequirementsMap(requirements, indexedNodeType.getRequirements(), dependencies, templateToMerge != null ? templateToMerge.getRequirements() : null,
-                toscaElementFinder);
-        fillProperties(properties, indexedNodeType.getProperties(), templateToMerge != null ? templateToMerge.getProperties() : null);
+        fillCapabilitiesMap(capabilities, indexedNodeType.getCapabilities(), dependencies, templateToMerge.getCapabilities(), toscaElementFinder);
+        fillRequirementsMap(requirements, indexedNodeType.getRequirements(), dependencies, templateToMerge.getRequirements(), toscaElementFinder);
+        fillProperties(properties, indexedNodeType.getProperties(), templateToMerge.getProperties());
         fillAttributes(attributes, indexedNodeType.getAttributes());
         
         nodeTemplate.setCapabilities(capabilities);
@@ -285,12 +280,44 @@ public class TopologyServiceCore {
         nodeTemplate.setProperties(properties);
         nodeTemplate.setAttributes(attributes);
         
-        if (templateToMerge != null && templateToMerge.getRelationships() != null) {
-            nodeTemplate.setRelationships(templateToMerge.getRelationships());
-        }
+        nodeTemplate.setRelationships(templateToMerge.getRelationships());
         
-        currentNodeType.set(null);
         return nodeTemplate;
+    }
+    
+    private static ThreadLocal<Csar> currentArchive = ThreadLocal.withInitial(() -> null);
+    
+    public static void mergeAncestorData(NodeTemplate target, ParsingContextExecution context, ICSARRepositorySearchService searchService) {
+        final ArchiveRoot archiveRoot = (ArchiveRoot) context.getRoot().getWrappedInstance();
+        currentArchive.set(archiveRoot.getArchive());
+        Set<String> ancestorsVisited = Sets.newLinkedHashSet();
+        Set<String> ancestorsToVisit = Sets.newLinkedHashSet();
+        ancestorsToVisit.add(target.getType());
+        while (!ancestorsToVisit.isEmpty()) {
+            String ancestorName = ancestorsToVisit.iterator().next();
+            ancestorsToVisit.remove(ancestorName);
+            ancestorsVisited.add(ancestorName);
+            IndexedNodeType ancestor = ToscaParsingUtil.getNodeTypeFromArchiveOrDependencies(target.getType(), archiveRoot, searchService);
+            if (ancestor!=null) {
+                mergeSelectedAncestorData(target, target, ancestor);
+                for (String anotherAncestor: ancestor.getDerivedFrom()) {
+                    if (!ancestorsVisited.contains(anotherAncestor)) {
+                        ancestorsToVisit.add(anotherAncestor);
+                    }
+                }
+            }
+        }
+        currentArchive.set(null);
+    }
+    
+    private static void mergeSelectedAncestorData(NodeTemplate target, NodeTemplate source, IndexedNodeType ancestor) {
+        Map<String, DeploymentArtifact> deploymentArtifacts = mergeMaps(source.getArtifacts(), ancestor.getArtifacts(), 
+            TopologyServiceCore::mergeDeploymentArtifact);
+        target.setArtifacts(deploymentArtifacts);
+
+        setFirstNonNull(target::setGroups, source::getGroups);
+        target.setInterfaces(mergeMaps(source.getInterfaces(), ancestor.getInterfaces(),
+            TopologyServiceCore::mergeInterface));
     }
 
     @SafeVarargs
@@ -340,11 +367,11 @@ public class TopologyServiceCore {
     // alternate format for when sources are different types
     private static <K,V> Map<K, V> mergeMaps(Map<K, V> primary, Map<K, V> secondary, BiFunction<V,V,V> mergeFn) {
         LinkedHashMap<K,V> result = Maps.newLinkedHashMap();
-        if (secondary!=null) {
-            secondary.forEach((k,v)->result.put(k, mergeFn.apply(result.get(k), v)));
-        }
         if (primary!=null) {
             primary.forEach((k,v)->result.put(k, mergeFn.apply(result.get(k), v)));
+        }
+        if (secondary!=null) {
+            secondary.forEach((k,v)->result.put(k, mergeFn.apply(result.get(k), v)));
         }
         return result;
     }
@@ -395,17 +422,14 @@ public class TopologyServiceCore {
     }
 
     private static DeploymentArtifact mergeDeploymentArtifact(DeploymentArtifact o1, DeploymentArtifact o2) {
-        return mergeDeploymentArtifact(o1, o2, currentNodeType.get());
-    }
-    private static DeploymentArtifact mergeDeploymentArtifact(DeploymentArtifact o1, DeploymentArtifact o2, IndexedNodeType nodeType) {
         DeploymentArtifact result = new DeploymentArtifact();
         
         setFirstNonNull(result, DeploymentArtifact::setArchiveName, DeploymentArtifact::getArchiveName, o1, o2);
-        if (result.getArchiveName()==null && nodeType!=null) result.setArchiveName(nodeType.getArchiveName());
-
+        if (result.getArchiveName()==null && currentArchive.get()!=null) result.setArchiveName(currentArchive.get().getName());
+        
         setFirstNonNull(result, DeploymentArtifact::setArchiveVersion, DeploymentArtifact::getArchiveVersion, o1, o2);
-        if (result.getArchiveVersion()==null && nodeType!=null) result.setArchiveVersion(nodeType.getArchiveVersion());
-
+        if (result.getArchiveVersion()==null && currentArchive.get()!=null) result.setArchiveVersion(currentArchive.get().getVersion());
+        
         setFirstNonNull(result, DeploymentArtifact::setArtifactName, DeploymentArtifact::getArtifactName, o1, o2);
         setFirstNonNull(result, DeploymentArtifact::setArtifactRef, DeploymentArtifact::getArtifactRef, o1, o2);
         setFirstNonNull(result, DeploymentArtifact::setArtifactType, DeploymentArtifact::getArtifactType, o1, o2);
@@ -415,17 +439,10 @@ public class TopologyServiceCore {
     }
 
     private static ImplementationArtifact mergeImplementationArtifact(ImplementationArtifact o1, ImplementationArtifact o2) {
-        return mergeImplementationArtifact(o1, o2, currentNodeType.get());
-    }
-    private static ImplementationArtifact mergeImplementationArtifact(ImplementationArtifact o1, ImplementationArtifact o2, IndexedNodeType nodeType) {
         ImplementationArtifact result = new ImplementationArtifact();
         
         setFirstNonNull(result, ImplementationArtifact::setArchiveName, ImplementationArtifact::getArchiveName, o1, o2);
-        if (result.getArchiveName()==null && nodeType!=null) result.setArchiveName(nodeType.getArchiveName());
-
         setFirstNonNull(result, ImplementationArtifact::setArchiveVersion, ImplementationArtifact::getArchiveVersion, o1, o2);
-        if (result.getArchiveVersion()==null && nodeType!=null) result.setArchiveVersion(nodeType.getArchiveVersion());
-
         setFirstNonNull(result, ImplementationArtifact::setArtifactRef, ImplementationArtifact::getArtifactRef, o1, o2);
         setFirstNonNull(result, ImplementationArtifact::setArtifactType, ImplementationArtifact::getArtifactType, o1, o2);
         
